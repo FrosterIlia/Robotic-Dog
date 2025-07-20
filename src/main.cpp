@@ -5,6 +5,7 @@
 #include "SPI.h"
 #include "SimpleFOCDrivers.h"
 #include "encoders/MT6701/MagneticSensorMT6701SSI.h"
+#include "SerialPlotter.h"
 
 #define PIN_A_HI GPIO_NUM_12
 #define PIN_A_LO GPIO_NUM_13
@@ -13,18 +14,23 @@
 #define PIN_C_HI GPIO_NUM_25
 #define PIN_C_LO GPIO_NUM_26
 
+SerialPlotter<2> plotter;
+
 #define SENSOR1_CS GPIO_NUM_5
 MagneticSensorMT6701SSI sensor(SENSOR1_CS);
 
-// Motor instance
-BLDCMotor motor = BLDCMotor(11);
+BLDCMotor motor = BLDCMotor(7);
 BLDCDriver6PWM driver = BLDCDriver6PWM(PIN_A_HI, PIN_A_LO, PIN_B_HI, PIN_B_LO, PIN_C_HI, PIN_C_LO);
 
-// angle set point variable
-float target_angle = 0;
-// instantiate the commander
+
 Commander command = Commander(Serial);
-void doTarget(char *cmd) { command.scalar(&target_angle, cmd); }
+void doMotor(char *cmd) { command.motor(&motor, cmd); }
+void doTarget(char *cmd) { command.scalar(&motor.target, cmd); }
+void doLimitVolt(char *cmd) { command.scalar(&motor.voltage_limit, cmd); }
+void doLimitVelocity(char *cmd) { command.scalar(&motor.velocity_limit, cmd); }
+void doPidP(char *cmd) { command.scalar(&motor.PID_velocity.P, cmd); }
+void doPidI(char *cmd) { command.scalar(&motor.PID_velocity.I, cmd); }
+void doPidRamp(char *cmd) { command.scalar(&motor.PID_velocity.output_ramp, cmd); }
 
 void setup()
 {
@@ -35,86 +41,130 @@ void setup()
   // comment out if not needed
   SimpleFOCDebug::enable(&Serial);
 
-  // initialise magnetic sensor hardware
+  // init the sensor
   sensor.init();
   // link the motor to the sensor
   motor.linkSensor(&sensor);
-  // driver config
-  // pwm frequency to be used [Hz]
-  // for atmega328 fixed to 32kHz
-  // esp32/stm32/teensy configurable
-  driver.pwm_frequency = 20000;
-  // power supply voltage [V]
+
   driver.voltage_power_supply = 12;
-  // Max DC voltage allowed - default voltage_power_supply
-  driver.voltage_limit = 12;
-  // daad_zone [0,1] - default 0.02f - 2%
-  driver.dead_zone = 0.05f;
-  driver.init();
-  // link the motor and the driver
+  driver.voltage_limit = 1.0f;
+  motor.velocity_limit = 1;
+  motor.voltage_limit = 1.0f;
+
+  motor.PID_velocity.P = 0.0f;
+  motor.PID_velocity.I = 0;
+  motor.PID_velocity.D = 0;
+  // driver.pwm_frequency = 7000;
+  // driver.dead_zone = 0.1f;
+  // init the driver
+  if (!driver.init())
+  {
+    Serial.println("Driver init failed!");
+    return;
+  }
+  // link driver
   motor.linkDriver(&driver);
 
-  // choose FOC modulation (optional)
-  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
+  motor.LPF_velocity.Tf = 0.05f;
 
   // set motion control loop to be used
+  motor.torque_controller = TorqueControlType::voltage;
   motor.controller = MotionControlType::angle;
 
-  // contoller configuration
-  // default parameters in defaults.h
-
-  // velocity PI controller parameters
-  motor.PID_velocity.P = 0.2f;
-  motor.PID_velocity.I = 20;
-  // maximal voltage to be set to the motor
-  motor.voltage_limit = 6;
-
-  // velocity low pass filtering time constant
-  // the lower the less filtered
-  motor.LPF_velocity.Tf = 0.01f;
-
-  // angle P controller
-  motor.P_angle.P = 20;
-  // maximal velocity of the position control
-  motor.velocity_limit = 40;
-
+  // use monitoring with serial
   // comment out if not needed
   motor.useMonitoring(Serial);
 
   // initialize motor
-  motor.init();
+  if (!motor.init())
+  {
+    Serial.println("Motor init failed!");
+    return;
+  }
   // align sensor and start FOC
-  motor.initFOC();
+  if (!motor.initFOC())
+  {
+    Serial.println("FOC init failed!");
+    return;
+  }
 
-  // add target command T
+  // set the initial motor target
+  motor.target = 0; // Volts
+
+  // add target command M
+  command.add('M', doMotor, "Motor");
   command.add('T', doTarget, "target angle");
+  command.add('L', doLimitVolt, "voltage limit");
+  command.add('V', doLimitVelocity, "velocity limit");
+  command.add('P', doPidP, "PID P");
+  command.add('I', doPidI, "PID I");
+  command.add('R', doPidRamp, "Output ramp");
+
+  auto &plot1 = plotter.add_plot<2, float>("P");
+  plot1.attach_parameter("angle", []()
+                         { return sensor.getAngle(); });
+  plot1.attach_parameter("vel", []()
+                         { return sensor.getVelocity(); });
+
+  auto &plot2 = plotter.add_plot<2, float>("K");
+  plot2.attach_parameter("P", &motor.PID_velocity.P);
+  plot2.attach_parameter("I", &motor.PID_velocity.I);
 
   Serial.println(F("Motor ready."));
-  Serial.println(F("Set the target angle using serial terminal:"));
+  Serial.println(F("Set the target using serial terminal and command M:"));
   _delay(1000);
-
-  // ... rest of setup
 }
 
 void loop()
 {
-  Serial.println(sensor.getSensorAngle());
   // main FOC algorithm function
-  // the faster you run this function the better
-  // Arduino UNO loop  ~1kHz
-  // Bluepill loop ~10kHz
   motor.loopFOC();
 
   // Motion control function
-  // velocity, position or voltage (defined in motor.controller)
-  // this function can be run at much lower frequency than loopFOC() function
-  // You can also use motor.move() and set the motor.target in the code
-  motor.move(target_angle);
+  motor.move();
 
-  // function intended to be used with serial plotter to monitor motor variables
-  // significantly slowing the execution down!!!!
-  motor.monitor();
 
-  // // user communication
-  command.run();
+  if (Serial.available() > 1)
+  {
+    char key = Serial.read();
+    float value = Serial.parseFloat();
+
+    switch (key)
+    {
+    case 'P':
+      motor.PID_velocity.P = value;
+      Serial.println(value);
+      break;
+
+    case 'I':
+      motor.PID_velocity.I = value;
+      Serial.println(value);
+      break;
+
+    case 'T':
+      motor.target = value;
+      Serial.println(value);
+      break;
+
+    case 'L':
+      motor.voltage_limit = value;
+      Serial.println(value);
+      break;
+
+    case 'V':
+      motor.velocity_limit = value;
+      Serial.println(value);
+      break;
+
+    case 'R':
+      motor.PID_velocity.output_ramp = value;
+      Serial.println(value);
+      break;
+
+    default:
+      break;
+    }
+  }
+
+  plotter.plot();
 }
