@@ -22,21 +22,12 @@ MagneticSensorMT6701SSI sensor(SENSOR1_CS);
 BLDCMotor motor = BLDCMotor(7);
 BLDCDriver6PWM driver = BLDCDriver6PWM(PIN_A_HI, PIN_A_LO, PIN_B_HI, PIN_B_LO, PIN_C_HI, PIN_C_LO);
 
-
-Commander command = Commander(Serial);
-void doMotor(char *cmd) { command.motor(&motor, cmd); }
-void doTarget(char *cmd) { command.scalar(&motor.target, cmd); }
-void doLimitVolt(char *cmd) { command.scalar(&motor.voltage_limit, cmd); }
-void doLimitVelocity(char *cmd) { command.scalar(&motor.velocity_limit, cmd); }
-void doPidP(char *cmd) { command.scalar(&motor.PID_velocity.P, cmd); }
-void doPidI(char *cmd) { command.scalar(&motor.PID_velocity.I, cmd); }
-void doPidRamp(char *cmd) { command.scalar(&motor.PID_velocity.output_ramp, cmd); }
-
 void setup()
 {
 
   // use monitoring with serial
   Serial.begin(115200);
+  Serial.setTimeout(5);
   // enable more verbose output for debugging
   // comment out if not needed
   SimpleFOCDebug::enable(&Serial);
@@ -46,10 +37,12 @@ void setup()
   // link the motor to the sensor
   motor.linkSensor(&sensor);
 
-  driver.voltage_power_supply = 12;
-  driver.voltage_limit = 1.0f;
-  motor.velocity_limit = 1;
+  driver.voltage_power_supply = 22.2;
+  driver.voltage_limit = 22.2f / 2;
+  motor.velocity_limit = 5;
   motor.voltage_limit = 1.0f;
+
+  motor.P_angle.P = 20;
 
   motor.PID_velocity.P = 0.0f;
   motor.PID_velocity.I = 0;
@@ -65,17 +58,34 @@ void setup()
   // link driver
   motor.linkDriver(&driver);
 
-  motor.LPF_velocity.Tf = 0.05f;
+  motor.LPF_velocity.Tf = 0.005f;
 
   // set motion control loop to be used
   motor.torque_controller = TorqueControlType::voltage;
   motor.controller = MotionControlType::angle;
 
+  motor.P_angle.limit = 100.0f;
+  motor.PID_velocity.limit = 100.0f;
+
   // use monitoring with serial
   // comment out if not needed
   motor.useMonitoring(Serial);
 
+  auto &plot1 = plotter.add_plot<2, float>("P");
+  plot1.attach_parameter("angle", []()
+                         { return sensor.getAngle(); });
+  plot1.attach_parameter("vel", []()
+                         { return sensor.getVelocity(); });
+
+  auto &plot2 = plotter.add_plot<2, float>("K");
+  plot2.attach_parameter("P", &motor.PID_velocity.P);
+  plot2.attach_parameter("I", &motor.PID_velocity.I);
+
   // initialize motor
+
+  // set the initial motor target
+  motor.target = 0;
+
   if (!motor.init())
   {
     Serial.println("Motor init failed!");
@@ -88,30 +98,7 @@ void setup()
     return;
   }
 
-  // set the initial motor target
-  motor.target = 0; // Volts
-
-  // add target command M
-  command.add('M', doMotor, "Motor");
-  command.add('T', doTarget, "target angle");
-  command.add('L', doLimitVolt, "voltage limit");
-  command.add('V', doLimitVelocity, "velocity limit");
-  command.add('P', doPidP, "PID P");
-  command.add('I', doPidI, "PID I");
-  command.add('R', doPidRamp, "Output ramp");
-
-  auto &plot1 = plotter.add_plot<2, float>("P");
-  plot1.attach_parameter("angle", []()
-                         { return sensor.getAngle(); });
-  plot1.attach_parameter("vel", []()
-                         { return sensor.getVelocity(); });
-
-  auto &plot2 = plotter.add_plot<2, float>("K");
-  plot2.attach_parameter("P", &motor.PID_velocity.P);
-  plot2.attach_parameter("I", &motor.PID_velocity.I);
-
   Serial.println(F("Motor ready."));
-  Serial.println(F("Set the target using serial terminal and command M:"));
   _delay(1000);
 }
 
@@ -122,7 +109,6 @@ void loop()
 
   // Motion control function
   motor.move();
-
 
   if (Serial.available() > 1)
   {
@@ -148,16 +134,33 @@ void loop()
 
     case 'L':
       motor.voltage_limit = value;
+      motor.PID_velocity.limit = value;
       Serial.println(value);
       break;
 
     case 'V':
       motor.velocity_limit = value;
+      motor.P_angle.limit = value;
       Serial.println(value);
       break;
 
     case 'R':
       motor.PID_velocity.output_ramp = value;
+      Serial.println(value);
+      break;
+
+    case 'A':
+      motor.P_angle.P = value;
+      Serial.println(value);
+      break;
+
+    case 'E':
+      motor.feed_forward_velocity = value;
+      Serial.println(value);
+      break;
+
+    case 'O':
+      motor.current_sp = value;
       Serial.println(value);
       break;
 

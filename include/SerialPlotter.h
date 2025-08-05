@@ -8,9 +8,42 @@
  * @copyright Copyright (c) 2025
  * 
  */
-#pragma once
+#ifndef FROSTER_SERIALPLOTTER_H
+#define FROSTER_SERIALPLOTTER_H
 #include <Arduino.h>
-#include "Timer.h"
+
+
+#ifndef FROSTER_TIMER_H
+#define FROSTER_TIMER_H
+
+class Timer
+{
+public:
+  Timer(uint16_t period = 1000)
+  {
+    _period = period;
+    _timer = millis();
+  }
+  bool isReady()
+  {
+    if (millis() - _timer >= _period)
+    {
+      _timer = millis();
+      return true;
+    }
+    return false;
+  }
+  void setPeriod(uint16_t newPeriod)
+  {
+    _period = newPeriod;
+  }
+
+private:
+  uint16_t _period;
+  uint32_t _timer;
+};
+
+#endif
 
 #define DEFAULT_TIMER_PERIOD 100
 
@@ -193,3 +226,5 @@ private:
     uint8_t _plots_count = 0;
     Timer _timer;
 };
+
+#endif
